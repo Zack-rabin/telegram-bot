@@ -20,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Bot token - REPLACE WITH YOUR ACTUAL TOKEN
-BOT_TOKEN = "7021309802:AAFBiiXS0d0lY291c6vCDkxwjT5bAX8Mxao"
+BOT_TOKEN = "7860194776:AAG_C99R75Z9bZjoGnQxsM0Fp7CW6BUFj_o"
 
 # Store subscribed members and their preferences
 subscribed_members = set()
@@ -432,10 +432,10 @@ def main():
                 time_module.sleep(10)
             else:
                 print("[FATAL] Max reconnection attempts reached. Check your internet connection.")
-               except KeyboardInterrupt:
-                   logger.info("Bot stopped by user")
-                   print("\n[INFO] Bot stopped by user")
-                   return
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user")
+            print("\n[INFO] Bot stopped by user")
+            return
         except Exception as e:
             reconnect_attempts += 1
             logger.error(f"Error (attempt {reconnect_attempts}/{max_reconnect_attempts}): {e}")
