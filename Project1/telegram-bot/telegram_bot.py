@@ -429,14 +429,11 @@ def main():
             print(f"[NETWORK ERROR] Connection failed. Retrying in 10 seconds... ({reconnect_attempts}/{max_reconnect_attempts})")
             if reconnect_attempts < max_reconnect_attempts:
                 import time as time_module
-                   try:
-                       time_module.sleep(10)
-                   except KeyboardInterrupt:
-                       print("\n[INFO] Bot stopped by user")
-                       return
+                time_module.sleep(10)
             else:
                 print("[FATAL] Max reconnection attempts reached. Check your internet connection.")
                except KeyboardInterrupt:
+                   logger.info("Bot stopped by user")
                    print("\n[INFO] Bot stopped by user")
                    return
         except Exception as e:
@@ -445,11 +442,7 @@ def main():
             print(f"[ERROR] {e}")
             if reconnect_attempts < max_reconnect_attempts:
                 import time as time_module
-                   try:
-                       time_module.sleep(10)
-                   except KeyboardInterrupt:
-                       print("\n[INFO] Bot stopped by user")
-                       return
+                time_module.sleep(10)
                 print(f"[INFO] Retrying... ({reconnect_attempts}/{max_reconnect_attempts})")
             else:
                 print("[FATAL] Max reconnection attempts reached.")
