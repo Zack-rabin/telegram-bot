@@ -6,11 +6,13 @@ Features: Subscriptions, Scheduling, Error Handling
 
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.error import TelegramError, NetworkError
 import random
 from datetime import datetime, time, timedelta
 import pytz
+import json
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +27,42 @@ BOT_TOKEN = "7860194776:AAG_C99R75Z9bZjoGnQxsM0Fp7CW6BUFj_o"
 # Store subscribed members and their preferences
 subscribed_members = set()
 subscription_preferences = {}  # chat_id -> "daily", "weekly", or "both"
+
+# Group management
+motivation_group_id = None  # group chat id where quotes will be posted
+motivation_group_invite = None  # stored invite link (str)
+motivation_group_members = set()  # user ids who accepted to join the group
+STATE_FILE = Path(__file__).parent / "state.json"
+
+
+def save_state():
+    """Persist group state to disk"""
+    try:
+        data = {
+            "motivation_group_id": motivation_group_id,
+            "motivation_group_invite": motivation_group_invite,
+            "motivation_group_members": list(motivation_group_members),
+        }
+        STATE_FILE.write_text(json.dumps(data))
+        logger.info("State saved to %s", STATE_FILE)
+    except Exception as e:
+        logger.error(f"Failed to save state: {e}")
+
+
+def load_state():
+    """Load persisted state from disk if present"""
+    global motivation_group_id, motivation_group_invite, motivation_group_members
+    try:
+        if not STATE_FILE.exists():
+            return
+        data = json.loads(STATE_FILE.read_text())
+        motivation_group_id = data.get("motivation_group_id")
+        motivation_group_invite = data.get("motivation_group_invite")
+        members = data.get("motivation_group_members") or []
+        motivation_group_members = set(members)
+        logger.info("Loaded state from %s", STATE_FILE)
+    except Exception as e:
+        logger.error(f"Failed to load state: {e}")
 
 # Motivational quotes
 DAILY_QUOTES = [
@@ -326,6 +364,127 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Unexpected error in callback: {e}")
 
+
+async def register_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Register the current group (bot must be admin) so the bot will post quotes there."""
+    global motivation_group_id, motivation_group_invite
+    try:
+        chat = update.effective_chat
+        chat_id = chat.id
+        # Only allow group/supergroup registration
+        if chat.type not in ("group", "supergroup"):
+            await context.bot.send_message(chat_id=chat_id, text="Please run this command in the group chat you want to register.")
+            return
+
+        # Only allow group admins to register the group
+        try:
+            requester = update.effective_user
+            member = await context.bot.get_chat_member(chat_id=chat_id, user_id=requester.id)
+            if member.status not in ("administrator", "creator"):
+                await context.bot.send_message(chat_id=chat_id, text="Only a group admin may register this group for motivational messages. Please ask an admin to run /register_group.")
+                return
+        except Exception:
+            # If we cannot verify admin status, proceed but warn
+            await context.bot.send_message(chat_id=chat_id, text="Warning: Unable to verify admin status. Ensure the bot is admin and has permissions to create invite links.")
+
+        # Create a permanent invite link (bot must be admin with invite_link right)
+        try:
+            invite = await context.bot.create_chat_invite_link(chat_id=chat_id)
+            motivation_group_invite = invite.invite_link
+        except Exception:
+            motivation_group_invite = None
+
+        motivation_group_id = chat_id
+        save_state()
+        if motivation_group_invite:
+            await context.bot.send_message(chat_id=chat_id, text=f"✅ This group is now registered for motivational quotes. Invite link created and saved.")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="✅ This group is now registered for motivational quotes. (Could not create invite link — please grant the bot invite permissions)")
+        logger.info(f"Group registered for motivation: {chat_id}")
+    except Exception as e:
+        logger.error(f"Error in register_group: {e}")
+
+
+async def join_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send the stored invite link to users who want to join the motivation group."""
+    global motivation_group_id, motivation_group_invite
+    try:
+        user_chat = update.effective_chat.id
+        if motivation_group_id is None:
+            await context.bot.send_message(chat_id=user_chat, text="No motivation group is registered yet. Ask an admin to register the group in the group chat using /register_group.")
+            return
+
+        # Ensure we have an invite; try to create one if missing
+        if not motivation_group_invite:
+            try:
+                invite = await context.bot.create_chat_invite_link(chat_id=motivation_group_id)
+                motivation_group_invite = invite.invite_link
+            except Exception:
+                motivation_group_invite = None
+
+        if motivation_group_invite:
+            keyboard = [[InlineKeyboardButton("Accept Invite →", url=motivation_group_invite)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.send_message(chat_id=user_chat, text="Click below to join the motivation group:", reply_markup=reply_markup)
+            logger.info(f"Sent group invite to user chat: {user_chat}")
+        else:
+            await context.bot.send_message(chat_id=user_chat, text="Unable to generate an invite link. Make sure the bot is admin in the registered group and has permission to create invite links.")
+    except Exception as e:
+        logger.error(f"Error in join_group: {e}")
+
+
+
+async def new_group_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle new_chat_members events to track who joined the registered group."""
+    global motivation_group_id, motivation_group_members
+    try:
+        if update.message is None or update.message.new_chat_members is None:
+            return
+        chat_id = update.effective_chat.id
+        if motivation_group_id is None or chat_id != motivation_group_id:
+            return
+
+        for user in update.message.new_chat_members:
+            motivation_group_members.add(user.id)
+            await context.bot.send_message(chat_id=chat_id, text=f"Welcome {user.full_name}! Thanks for joining the motivation group.")
+            logger.info(f"User {user.id} joined motivation group {chat_id}")
+            # Persist membership
+            try:
+                save_state()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"Error in new_group_member_handler: {e}")
+
+
+async def group_members_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """List known members who have joined via the bot."""
+    global motivation_group_members, motivation_group_id
+    try:
+        chat_id = update.effective_chat.id
+        if motivation_group_id is None:
+            await context.bot.send_message(chat_id=chat_id, text="No motivation group is registered yet.")
+            return
+
+        members_list = "\n".join([str(uid) for uid in sorted(motivation_group_members)]) or "(no members tracked yet)"
+        await context.bot.send_message(chat_id=chat_id, text=f"Tracked group members:\n{members_list}")
+    except Exception as e:
+        logger.error(f"Error in group_members_command: {e}")
+
+
+async def send_group_motivation(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a random quote to the registered group every 5 minutes."""
+    global motivation_group_id
+    try:
+        if motivation_group_id is None:
+            return
+
+        quote = get_random_quote()
+        await context.bot.send_message(chat_id=motivation_group_id, text=f"🔥 <b>Motivation</b>\n\n{quote}", parse_mode='HTML')
+        logger.info(f"Sent group motivation to {motivation_group_id}")
+    except Exception as e:
+        logger.error(f"Error in send_group_motivation: {e}")
+
 # ==================== SCHEDULED TASKS ====================
 
 async def send_daily_motivation(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -374,6 +533,8 @@ async def send_weekly_motivation(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main():
     """Start the bot"""
+    # Load persisted state before starting
+    load_state()
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("[ERROR] BOT_TOKEN not set!")
         print("Please replace 'YOUR_BOT_TOKEN_HERE' with your actual bot token from @BotFather")
@@ -399,6 +560,13 @@ def main():
             
             # Add callback handler for buttons
             app.add_handler(CallbackQueryHandler(button_callback))
+
+            # Group management handlers
+            app.add_handler(CommandHandler("register_group", register_group))
+            app.add_handler(CommandHandler("join_group", join_group))
+            app.add_handler(CommandHandler("group_members", group_members_command))
+            # Track new members joining the registered group
+            app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_group_member_handler))
             
             # Add jobs for scheduled messages using job_queue
             job_queue = app.job_queue
@@ -415,6 +583,9 @@ def main():
                 time=time(hour=0, minute=0),
                 days=(0,)
             )
+
+            # Schedule group motivational quotes every 5 minutes
+            job_queue.run_repeating(send_group_motivation, interval=300, first=10)
             
             logger.info("Bot started successfully!")
             print("[SUCCESS] Bot is running! Press Ctrl+C to stop.")
